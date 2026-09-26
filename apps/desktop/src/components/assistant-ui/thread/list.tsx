@@ -475,12 +475,35 @@ const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
   // new resetKey per appended part, which reconciled every turn's subtree on
   // every tick (measured: 540 wasted Block renders per explain() sample with
   // two threads streaming).
-  const structuralSignature = useAuiState(s =>
-    s.thread.messages.map((message, index) => `${index}:${message.id}:${responseMessageRole(message)}`).join('\n')
+  // Folded into a single store pass: one walk over messages produces both
+  // signatures separated by a NUL. The two derived slices below preserve
+  // the EXACT strings the previous two selectors returned — only the work
+  // is halved. NUL is safe as a delimiter: `message.id` is an assistant-ui
+  // identifier (no NUL), `responseMessageRole` returns a small role string
+  // (`assistant` / `user` / `system` / `background`), and
+  // `messagePaintWeight` returns a finite number. Downstream consumers
+  // (#71496) read `structuralSignature` as before and need no change.
+
+  const threadSignatures = useAuiState(s => {
+    const messages = s.thread.messages
+    const structural: string[] = new Array(messages.length)
+    const weights: string[] = new Array(messages.length)
+    for (let i = 0; i < messages.length; i += 1) {
+      const message = messages[i]
+      structural[i] = `${i}:${message.id}:${responseMessageRole(message)}`
+      weights[i] = String(messagePaintWeight(message.content))
+    }
+    return structural.join('\n') + '\x00' + weights.join(',')
+  })
+
+  const structuralSignature = useMemo(
+    () => threadSignatures.slice(0, threadSignatures.indexOf('\x00')),
+    [threadSignatures]
   )
 
-  const weightSignature = useAuiState(s =>
-    s.thread.messages.map(message => messagePaintWeight(message.content)).join(',')
+  const weightSignature = useMemo(
+    () => threadSignatures.slice(threadSignatures.indexOf('\x00') + 1),
+    [threadSignatures]
   )
 
   const { t } = useI18n()
