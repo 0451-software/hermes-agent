@@ -1,4 +1,4 @@
-import { type ReactNode, type RefObject, useEffect } from 'react'
+import { type ReactNode, type RefObject, useEffect, useRef } from 'react'
 
 import { publishThreadMessagesBelow } from '@/store/thread-scroll'
 
@@ -65,13 +65,22 @@ export function useMessagesBelow({
   sessionKey,
   sessionId
 }: MessagesBelowOptions) {
+  // `rows` remints on every tailStart move (list.tsx:1500-1511). Keep the last
+  // structural fingerprint (group count + sessionKey) so we can short-circuit
+  // when the underlying message set is unchanged. The deps below still list
+  // `rows` so observer setup re-runs if rows go stale.
+  const lastFingerprintRef = useRef<string | null>(null)
+
   useEffect(() => {
     if (!paneVisible) {
+      lastFingerprintRef.current = null
+
       return
     }
 
     if (isAtBottom) {
       publishThreadMessagesBelow(0, { paneVisible, sessionId })
+      lastFingerprintRef.current = `bottom:${sessionKey ?? ''}`
 
       return
     }
@@ -82,6 +91,14 @@ export function useMessagesBelow({
     if (!viewport || !content) {
       return
     }
+
+    // `rows` remints on every tailStart move (list.tsx:1500-1511). Skip the
+    // initial layout walk when the underlying message set is unchanged, but
+    // keep the scroll/resize listeners attached so user-driven updates still
+    // measure. The deps below still list `rows` so listener setup re-runs.
+    const fingerprint = `${content.querySelectorAll('[data-slot="aui_message-group"]').length}:${sessionKey ?? ''}`
+    const isFirstMeasure = fingerprint !== lastFingerprintRef.current
+    lastFingerprintRef.current = fingerprint
 
     let frame = 0
     let retried = false
@@ -109,7 +126,10 @@ export function useMessagesBelow({
       }
     }
 
-    schedule()
+    if (isFirstMeasure) {
+      schedule()
+    }
+
     viewport.addEventListener('scroll', schedule, { passive: true })
     const observer = new ResizeObserver(schedule)
     observer.observe(viewport)
