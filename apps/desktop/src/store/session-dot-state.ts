@@ -32,7 +32,7 @@ import { $messagingSessions, $sessions, $unreadFinishedSessionIds, lineageAliase
 import {
   $attentionSessionIds,
   $draftSessionIds,
-  $sessionStates,
+  $sessionStatusSlice,
   $stalledSessionIds,
   $workingSessionIds
 } from './session-states'
@@ -47,10 +47,15 @@ import { $subagentsBySession, activeSubagentCount } from './subagents'
 // bridge and fresh-chat fallback as $backgroundRunningSessionIds:
 // $subagentsBySession is keyed by runtime id, surfaces key on stored ids, and
 // lineageAliases covers whichever tip of the conversation a surface holds.
+//
+// Reads the stored-id projection from $sessionStatusSlice rather than the
+// full $sessionStates — the slice only republishes on status edges, so a
+// per-token message delta on the focused session (the hot path that kept
+// retreading every session-row selector) doesn't tick this atom either.
 let delegatingIds: readonly string[] = []
 export const $delegatingSessionIds = computed(
-  [$subagentsBySession, $sessionStates, $sessions],
-  (bySession, states, sessions) => {
+  [$subagentsBySession, $sessionStatusSlice, $sessions],
+  (bySession, statuses, sessions) => {
     const ids = new Set<string>()
 
     for (const [runtimeId, items] of Object.entries(bySession)) {
@@ -58,7 +63,7 @@ export const $delegatingSessionIds = computed(
         continue
       }
 
-      for (const alias of lineageAliases(states[runtimeId]?.storedSessionId ?? runtimeId, sessions)) {
+      for (const alias of lineageAliases(statuses[runtimeId]?.storedSessionId ?? runtimeId, sessions)) {
         ids.add(alias)
       }
     }
