@@ -17055,7 +17055,7 @@ ipcMain.handle('hermes:api', async (_event, request) => {
     // Persist the failure (full stack) before the rejection crosses to the
     // renderer, where the invoke wrapper strips it to a one-line message.
     rememberLog(formatApiRequestFailure(request, error))
-    flushDesktopLogBufferSync()
+    void flushDesktopLogBufferAsync()
     throw error
   }
 })
