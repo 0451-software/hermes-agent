@@ -314,17 +314,23 @@ export function buildGroups(signature: string): MessageGroup[] {
 // `exemptNewest` the newest turn is kept AND left out of the sum, so a turn
 // whose weight is still changing cannot move the cut. Returns the index of that
 // first visible group.
+//
+// `weights` is an optional parallel array aligned with `groups` (length
+// matches, same index). When provided it overrides `group.weight` so callers
+// don't have to spread one new object per group per flush to materialise the
+// weighted groups — the index-keyed lookup is allocation-free.
 export function firstVisibleGroupIndex(
   groups: readonly MessageGroup[],
   budget: number,
   minVisible = 0,
-  exemptNewest = false
+  exemptNewest = false,
+  weights?: readonly number[]
 ): number {
   const budgetedEnd = exemptNewest ? Math.max(0, groups.length - 1) : groups.length
   let firstVisible = budgetedEnd
 
   for (let i = budgetedEnd - 1, weight = 0; i >= 0; i--) {
-    weight += groups[i].weight
+    weight += weights !== undefined ? (weights[i] ?? 1) : groups[i].weight
     firstVisible = i
 
     if (weight >= budget) {
@@ -376,18 +382,25 @@ export const LIVE_TAIL_MAX_GROUPS = 6
  * is the live tail and stays rendered. Walks newest-first accumulating weight,
  * so the tail covers a viewport's worth of content rather than a fixed number
  * of turns, clamped to [MIN, MAX] turns. Computed once per render, not per row.
+ *
+ * `weights` is an optional parallel array aligned with `groups`; when
+ * provided, `weights[i]` overrides `groups[i].weight` for the sum. Same
+ * allocation-free rationale as firstVisibleGroupIndex above. Appended at the
+ * end (not before `tailWeight`) so the existing positional callers
+ * (`liveTailStart(groups, tailWeight)`) stay typed.
  */
 export function liveTailStart(
   groups: readonly MessageGroup[],
   tailWeight = LIVE_TAIL_PARTS,
   minGroups = LIVE_TAIL_MIN_GROUPS,
-  maxGroups = LIVE_TAIL_MAX_GROUPS
+  maxGroups = LIVE_TAIL_MAX_GROUPS,
+  weights?: readonly number[]
 ): number {
   let weight = 0
   let start = groups.length
 
   for (let i = groups.length - 1; i >= 0; i--) {
-    weight += groups[i]?.weight ?? 1
+    weight += weights !== undefined ? (weights[i] ?? 1) : (groups[i]?.weight ?? 1)
     start = i
 
     if (weight > tailWeight) {
@@ -625,16 +638,21 @@ const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
   // Weights (part count + visible character cost) fold into the BUDGET only.
   // Group identity stays structural, so a streaming append re-runs this cheap
   // sum — not the row JSX. Settled content hits messagePaintWeight's WeakMap.
-  const weightedGroups = useMemo(() => {
-    const weights = weightSignature.split(',').map(w => Number(w) || 1)
+  //
+  // Kept as a parallel `weights: number[]` aligned with `groups` instead of
+  // spreading one new { ...group, weight } object per group: per-flush we now
+  // allocate one Number[] (cheap, GC-friendly) instead of N objects that the
+  // GC must reclaim during a stream. Consumers below read `weights[i]` via
+  // the optional `weights` parameter on firstVisibleGroupIndex / liveTailStart
+  // / useTimelineReveal; the group objects pass through unchanged.
+  const weights = useMemo(() => {
+    const parsed = weightSignature.split(',').map(w => Number(w) || 1)
 
-    return groups.map(group => ({
-      ...group,
-      weight:
-        group.kind === 'turn'
-          ? group.indices.reduce((sum, index) => sum + (weights[index] ?? 1), 0)
-          : (weights[group.index] ?? 1)
-    }))
+    return groups.map(group =>
+      group.kind === 'turn'
+        ? group.indices.reduce((sum, index) => sum + (parsed[index] ?? 1), 0)
+        : (parsed[group.index] ?? 1)
+    )
   }, [groups, weightSignature])
 
   // The turn floor and the newest-turn exemption apply to a real page only.
@@ -649,7 +667,7 @@ const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
   // clamp looks like a user scroll-up to use-stick-to-bottom.
   const fullPage = renderBudget >= paneBudget
 
-  const hiddenCount = firstVisibleGroupIndex(weightedGroups, renderBudget, fullPage ? MIN_VISIBLE_GROUPS : 0, fullPage)
+  const hiddenCount = firstVisibleGroupIndex(groups, renderBudget, fullPage ? MIN_VISIBLE_GROUPS : 0, fullPage, weights)
 
   // Memoized for IDENTITY, not to save the slice: `rows` below keys off this
   // array, and an inline slice handed it a fresh array every render — so the
@@ -709,8 +727,14 @@ const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
   // groups (render cost, not turns) so the tail is a viewport's worth of content —
   // see liveTailStart. Computed once here rather than per row.
   const tailStart = useMemo(
-    () => liveTailStart(hiddenCount > 0 ? weightedGroups.slice(hiddenCount) : weightedGroups),
-    [weightedGroups, hiddenCount]
+    () => liveTailStart(
+      hiddenCount > 0 ? groups.slice(hiddenCount) : groups,
+      LIVE_TAIL_PARTS,
+      LIVE_TAIL_MIN_GROUPS,
+      LIVE_TAIL_MAX_GROUPS,
+      weights
+    ),
+    [groups, hiddenCount, weights]
   )
 
   // Secondary windows (new-session scratch, subagent watch, cmd-click pop-out)
@@ -1310,7 +1334,8 @@ const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
 
   useTimelineReveal({
     viewport: scrollRef,
-    groups: weightedGroups,
+    groups,
+    weights,
     hiddenCount,
     renderBudget,
     olderAvailable,
