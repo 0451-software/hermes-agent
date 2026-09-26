@@ -959,9 +959,17 @@ export function withUniqueToolCallIdsWithinMessage(message: ChatMessage): ChatMe
   let seen: null | Set<string> = null
   let changed = false
 
-  const parts = message.parts.map((part, index) => {
+  // Track an existing parts array so we can return the same reference when
+  // nothing changes — useRuntimeMessageRepository runs this per message per
+  // flush, and a new array reference every flush defeats its WeakMap identity
+  // cache even when the parts themselves are structurally unchanged.
+  const originalParts = message.parts
+
+  for (let index = 0; index < originalParts.length; index++) {
+    const part = originalParts[index]
+
     if (part.type !== 'tool-call' || !part.toolCallId) {
-      return part
+      continue
     }
 
     if (seen === null) {
@@ -971,15 +979,44 @@ export function withUniqueToolCallIdsWithinMessage(message: ChatMessage): ChatMe
     if (!seen.has(part.toolCallId)) {
       seen.add(part.toolCallId)
 
-      return part
+      continue
     }
 
-    changed = true
-    const uniqueId = `${part.toolCallId}-dup-${index}`
-    seen.add(uniqueId)
+    if (!changed) {
+      // First rename: build a new array, copying the seen prefixes through.
+      changed = true
 
-    return { ...part, toolCallId: uniqueId } as ChatMessagePart
-  })
+      const parts = originalParts.slice(0, index)
+      const rebuiltSeen = seen
 
-  return changed ? { ...message, parts } : message
+      rebuiltSeen.add(`${part.toolCallId}-dup-${index}`)
+
+      parts.push({ ...part, toolCallId: `${part.toolCallId}-dup-${index}` } as ChatMessagePart)
+
+      for (let next = index + 1; next < originalParts.length; next++) {
+        const nextPart = originalParts[next]
+
+        if (nextPart.type !== 'tool-call' || !nextPart.toolCallId) {
+          parts.push(nextPart)
+
+          continue
+        }
+
+        if (!rebuiltSeen.has(nextPart.toolCallId)) {
+          rebuiltSeen.add(nextPart.toolCallId)
+          parts.push(nextPart)
+
+          continue
+        }
+
+        const uniqueId = `${nextPart.toolCallId}-dup-${next}`
+        rebuiltSeen.add(uniqueId)
+        parts.push({ ...nextPart, toolCallId: uniqueId } as ChatMessagePart)
+      }
+
+      return { ...message, parts }
+    }
+  }
+
+  return message
 }

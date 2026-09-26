@@ -59,6 +59,24 @@ interface SessionStateCacheOptions {
   setMessages: (messages: ChatMessage[]) => void
 }
 
+// perf(flushPendingViewState): fast predicate to skip the deep-compare pair
+// (preserveLocalAssistantErrors + chatMessageArraysEquivalent) when neither
+// side of the transcript carries any error / recovered frame. Those two flags
+// are the only fields the pair exists to preserve; everything else falls
+// through to a cheap reference compare + setMessages. Runs at ~30 Hz during
+// streaming, so a single short-circuit saves O(N messages × M parts) work.
+function hasErrorFrames(...lists: ReadonlyArray<ReadonlyArray<ChatMessage>>): boolean {
+  for (const list of lists) {
+    for (const message of list) {
+      if (message.errorSurface || message.recovered) {
+        return true
+      }
+    }
+  }
+
+  return false
+}
+
 function syncRuntimeMetadataToView(state: ClientSessionState) {
   setCurrentModel(state.model ?? '')
   setCurrentProvider(state.provider ?? '')
@@ -284,12 +302,27 @@ export function useSessionStateCache({
     // an out-of-funds error) onto this one — then cascade it everywhere as the
     // polluted view becomes the next switch's baseline. Only carry errors
     // across a same-session refresh; our cached state already keeps its own.
-    const nextMessages =
-      viewSessionIdRef.current === pending.sessionId
-        ? preserveLocalAssistantErrors(pending.state.messages, currentMessages)
-        : pending.state.messages
+    //
+    // perf(flushPendingViewState): the deep-compare pair below
+    // (preserveLocalAssistantErrors + chatMessageArraysEquivalent) was added
+    // for warm-resume jitter but now fires on every streaming flush at ~30 Hz.
+    // Both walk the whole transcript and rebuild every parts array; the result
+    // is almost always "equivalent" and discarded. Skip the whole pair when
+    // neither side carries any error / recovered frame — the only state that
+    // could possibly need preservation or compare-flag a difference.
+    const needsErrorPreservation =
+      viewSessionIdRef.current === pending.sessionId &&
+      hasErrorFrames(currentMessages, pending.state.messages)
 
-    if (!chatMessageArraysEquivalent(nextMessages, currentMessages)) {
+    const nextMessages = needsErrorPreservation
+      ? preserveLocalAssistantErrors(pending.state.messages, currentMessages)
+      : pending.state.messages
+
+    if (needsErrorPreservation) {
+      if (!chatMessageArraysEquivalent(nextMessages, currentMessages)) {
+        setMessages(nextMessages)
+      }
+    } else if (nextMessages !== currentMessages) {
       setMessages(nextMessages)
     }
 

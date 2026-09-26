@@ -2,6 +2,7 @@ import { ActionBarPrimitive, BranchPickerPrimitive, MessagePrimitive, useAuiStat
 import { type FC, type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 
 import { DirectiveContent } from '@/components/assistant-ui/directive-text'
+import { useThreadIndex } from '@/components/assistant-ui/thread/inter-agent-index'
 import {
   messageAttachmentRefs,
   messageContentText,
@@ -250,35 +251,12 @@ export const UserMessage: FC<{
   const messageText = messageContentText(content)
   const threadRunning = useAuiState(s => s.thread.isRunning)
 
-  const latestUserId = useAuiState(s => {
-    for (let i = s.thread.messages.length - 1; i >= 0; i--) {
-      const message = s.thread.messages[i] as { id?: string; role?: string }
-
-      if (message.role === 'user') {
-        return message.id ?? null
-      }
-    }
-
-    return null
-  })
-
-  const runtimeUserOrdinal = useAuiState(s => {
-    let ordinal = 0
-
-    for (const message of s.thread.messages) {
-      if (message.role !== 'user') {
-        continue
-      }
-
-      if (message.id === s.message.id) {
-        return ordinal
-      }
-
-      ordinal += 1
-    }
-
-    return null
-  })
+  // PERF (Fix 5): the parent now runs the two whole-list scans once per
+  // structural-signature flip. Each UserMessage does a Map lookup instead
+  // of scanning `s.thread.messages` on every store notification.
+  const threadIndex = useThreadIndex()
+  const latestUserId = threadIndex.latestUserId
+  const runtimeUserOrdinal = threadIndex.runtimeUserOrdinalById.get(messageId) ?? null
 
   const attachmentRefs = useAuiState(s => {
     const custom = (s.message.metadata?.custom ?? {}) as { attachmentRefs?: unknown }
