@@ -16,7 +16,6 @@ import { requestModelMenuToggle } from '@/app/chat/composer/focus'
 import { useComposerScope } from '@/app/chat/composer/scope'
 import { useSessionView } from '@/app/chat/session-view'
 import { SETTINGS_ROUTE } from '@/app/routes'
-import { dispatchedTo } from '@/components/assistant-ui/thread/agent-delivery'
 import { ChangedFilesCard } from '@/components/assistant-ui/thread/changed-files-card'
 import {
   contentHasVisibleText,
@@ -29,7 +28,7 @@ import { ResponseMessageIds } from '@/components/assistant-ui/thread/response-gr
 import { ResponseLoadingIndicator, TurnActivityIndicator } from '@/components/assistant-ui/thread/status'
 import { MessageTimelineTimestamp } from '@/components/assistant-ui/thread/timeline-timestamp'
 import { useMessageReactions, useTapbackDoubleClick } from '@/components/assistant-ui/thread/use-message-reactions'
-import { AGENT_MESSAGE_RE } from '@/components/assistant-ui/thread/user-message'
+import { useThreadIndex } from '@/components/assistant-ui/thread/inter-agent-index'
 import { isApprovalActivity, isCurrentTurnMessage } from '@/components/assistant-ui/tool/approval-activity'
 import { TooltipIconButton } from '@/components/assistant-ui/tooltip-icon-button'
 import { formatElapsed } from '@/components/chat/activity-timer'
@@ -115,39 +114,15 @@ export const AssistantMessage: FC<AssistantMessageProps> = props => {
   // the teammate's answer and the next assistant message is the report to
   // the human (#114629); folding it hid the substance of the turn behind a
   // "Replied to" row nothing was ever sent through.
-  const interAgentSender = useAuiState(s => {
-    const messages = s.thread.messages
-
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].id !== s.message.id) {
-        continue
-      }
-
-      for (let j = i - 1; j >= 0; j--) {
-        const prev = messages[j] as { content?: unknown; role?: string }
-
-        if (prev.role === 'assistant') {
-          return null
-        }
-
-        if (prev.role === 'user') {
-          const match = AGENT_MESSAGE_RE.exec(messageContentText(prev.content as never).trim())
-
-          if (!match) {
-            return null
-          }
-
-          const sender = (match[1] || match[3] || 'agent').trim()
-
-          return dispatchedTo(messages.slice(0, j), [match[1], match[2], match[3]]) ? null : sender
-        }
-      }
-
-      return null
-    }
-
-    return null
-  })
+  //
+  // PERF (Fix 5): this used to be an O(messages) `useAuiState` selector that
+  // every mounted AssistantMessage ran on every store update (O(messages²)
+  // per flush + a full-text join + a greedy AGENT_MESSAGE_RE.exec). The
+  // parent now computes the same value once per structural-signature flip
+  // and serves it through `useThreadIndex`. A single Map lookup replaces
+  // the scan; the regex only runs when the thread shape changes.
+  const messageId = useAuiState(s => s.message.id)
+  const interAgentSender = useThreadIndex().interAgentSenderById.get(messageId) ?? null
 
   // The collapse gate below needs the LIVE running status, but only an
   // inter-agent reply can ever be collapsed. Dispatching on that first keeps
