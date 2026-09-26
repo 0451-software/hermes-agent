@@ -35,7 +35,7 @@ import type { WorkspaceMode } from '@/contrib/types'
 import type { ChatMessage } from '@/lib/chat-messages'
 import type { ErrorSurface } from '@/lib/error-surface'
 import { tileFocusStampOnFocusChange } from '@/lib/session-timer-since'
-import { stableArray } from '@/lib/stable-array'
+import { stableArray, stableRecord } from '@/lib/stable-array'
 import { readJson, writeJson } from '@/lib/storage'
 import type { SessionInfo } from '@/types/hermes'
 
@@ -86,6 +86,75 @@ import { isBrowserWindow, isSecondaryWindow } from './windows'
 // ---------------------------------------------------------------------------
 
 export const $sessionStates = atom<Record<string, ClientSessionState>>({})
+
+// ---------------------------------------------------------------------------
+// Per-session STATUS slice — coarse projection of `$sessionStates` for the
+// derived working/attention/draft atoms. Streams republish `$sessionStates`
+// tens of times per second (per-token message deltas, session.info
+// heartbeats), and every publish made the multi-session derived atoms re-run
+// their selectors and walk every cached session via Object.entries. The slice
+// republishes only on status edges (busy / needsInput / has-messages / stored-
+// id), so the sidebar's working / attention / draft views react at status
+// edges only — O(once per turn) instead of O(tokens × turns). `stableRecord`
+// keeps the parent record ref identical when every per-runtime slice is
+// structurally unchanged, so a `computed` selector sees no input change.
+// ---------------------------------------------------------------------------
+
+export interface SessionStatusEntry {
+  busy: boolean
+  needsInput: boolean
+  hasMessages: boolean
+  storedSessionId: string | null
+}
+
+let statusSliceByRuntimeId: Readonly<Record<string, SessionStatusEntry>> = {}
+
+export const $sessionStatusSlice = atom<Readonly<Record<string, SessionStatusEntry>>>(statusSliceByRuntimeId)
+
+const sliceFor = (state: ClientSessionState | null | undefined): SessionStatusEntry | null => {
+  if (!state) return null
+  // Defensive: older fixtures (e.g. active-work.test.ts) publish only
+  // `busy`/`storedSessionId` without a transcript.
+  const messages = Array.isArray(state.messages) ? state.messages : []
+  return {
+    busy: state.busy,
+    needsInput: state.needsInput,
+    hasMessages: messages.length > 0,
+    storedSessionId: state.storedSessionId
+  }
+}
+
+const publishSliceEntry = (runtimeId: string, entry: SessionStatusEntry | null): void => {
+  const prev = statusSliceByRuntimeId
+  const prevEntry = prev[runtimeId]
+  const next = { ...prev }
+
+  if (entry === null) {
+    if (!(runtimeId in prev)) return
+    delete next[runtimeId]
+  } else if (
+    prevEntry === undefined ||
+    prevEntry.busy !== entry.busy ||
+    prevEntry.needsInput !== entry.needsInput ||
+    prevEntry.hasMessages !== entry.hasMessages ||
+    prevEntry.storedSessionId !== entry.storedSessionId
+  ) {
+    next[runtimeId] = entry
+  } else {
+    return
+  }
+
+  statusSliceByRuntimeId = stableRecord(prev, next)
+  $sessionStatusSlice.set(statusSliceByRuntimeId)
+}
+
+/** Reset the slice mirror to empty (internal — wired into
+ * clearAllSessionStates and the test reset paths). */
+export const resetSessionStatusSlice = (): void => {
+  if (Object.keys(statusSliceByRuntimeId).length === 0) return
+  statusSliceByRuntimeId = stableRecord(statusSliceByRuntimeId, {})
+  $sessionStatusSlice.set(statusSliceByRuntimeId)
+}
 
 // ---------------------------------------------------------------------------
 // Event-source scopes: which registry connection's socket delivered a runtime
@@ -768,6 +837,7 @@ export function publishSessionState(runtimeId: string, state: ClientSessionState
   }
 
   $sessionStates.set({ ...current, [runtimeId]: state })
+  publishSliceEntry(runtimeId, sliceFor(state))
   handleTransition(prev, state, runtimeId)
 }
 
@@ -793,6 +863,7 @@ export function releaseSessionTranscript(runtimeId: string, state?: ClientSessio
     Array.isArray(retained.messages) && retained.messages.length === 0 ? retained : { ...retained, messages: [] }
 
   $sessionStates.set({ ...current, [runtimeId]: lightweight })
+  publishSliceEntry(runtimeId, sliceFor(lightweight))
 }
 
 export function dropSessionState(runtimeId: string) {
@@ -815,6 +886,7 @@ export function dropSessionState(runtimeId: string) {
 
   const { [runtimeId]: _dropped, ...rest } = current
   $sessionStates.set(rest)
+  publishSliceEntry(runtimeId, null)
 }
 
 /** Drop every cached session state — used on soft gateway-mode apply so the
@@ -841,6 +913,7 @@ export function clearAllSessionStates() {
   sessionOwnerByRuntimeId.clear()
   $stalledSessionIds.set([])
   $sessionStates.set({})
+  resetSessionStatusSlice()
 }
 
 /** Downgrade cached busy/awaiting states after a gateway reconnect.
@@ -939,10 +1012,10 @@ export function reconcileBusyStatesOnReconnect(scope?: string) {
 // id exists the two are the same value (submit.ts: "an unpersisted
 // conversation's queue key IS its runtime id"), so the row matches; once a
 // session is persisted its runtime id is nobody's key and the fallback is inert.
-const storedIds = (
-  states: Record<string, ClientSessionState>,
+const storedIds = <T extends { storedSessionId: string | null }>(
+  states: Record<string, T>,
   sessions: readonly SessionInfo[],
-  pred: (s: ClientSessionState) => boolean
+  pred: (s: T) => boolean
 ) => {
   const ids = new Set<string>()
 
@@ -961,21 +1034,21 @@ const storedIds = (
 
 let workingIds: readonly string[] = []
 export const $workingSessionIds = computed(
-  [$sessionStates, $sessions],
-  (states, sessions) =>
+  [$sessionStatusSlice, $sessions],
+  (statuses, sessions) =>
     (workingIds = stableArray(
       workingIds,
-      storedIds(states, sessions, s => s.busy)
+      storedIds(statuses, sessions, s => s.busy)
     ))
 )
 
 let attentionIds: readonly string[] = []
 export const $attentionSessionIds = computed(
-  [$sessionStates, $sessions],
-  (states, sessions) =>
+  [$sessionStatusSlice, $sessions],
+  (statuses, sessions) =>
     (attentionIds = stableArray(
       attentionIds,
-      storedIds(states, sessions, s => s.needsInput)
+      storedIds(statuses, sessions, s => s.needsInput)
     ))
 )
 
@@ -988,13 +1061,13 @@ export const $attentionSessionIds = computed(
 // binding its runtime and loading its transcript, and calling that a draft
 // would flash the wrong mark on a conversation with years of history in it.
 let draftIds: readonly string[] = []
-export const $draftSessionIds = computed([$sessionStates, $sessions], (states, sessions) => {
-  const unsent = (state: ClientSessionState) => {
-    if (state.busy || state.messages.length > 0) {
+export const $draftSessionIds = computed([$sessionStatusSlice, $sessions], (statuses, sessions) => {
+  const unsent = (entry: SessionStatusEntry) => {
+    if (entry.busy || entry.hasMessages) {
       return false
     }
 
-    const storedId = state.storedSessionId
+    const storedId = entry.storedSessionId
 
     // No stored id is the ⌘T tab that hasn't reached the backend yet: a draft
     // by definition, and no row to consult. Asking anyway would match a row on
@@ -1008,7 +1081,7 @@ export const $draftSessionIds = computed([$sessionStates, $sessions], (states, s
     return !row || row.message_count === 0
   }
 
-  return (draftIds = stableArray(draftIds, storedIds(states, sessions, unsent)))
+  return (draftIds = stableArray(draftIds, storedIds(statuses, sessions, unsent)))
 })
 
 // ---------------------------------------------------------------------------
