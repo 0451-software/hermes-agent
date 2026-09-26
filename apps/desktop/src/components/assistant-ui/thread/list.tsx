@@ -46,6 +46,7 @@ import { isSecondaryWindow } from '@/store/windows'
 import { MessageRenderBoundary } from '../message-render-boundary'
 import { PendingApprovalStack } from '../tool/approval'
 
+import { ThreadIndexProvider, useThreadIndexValue } from './inter-agent-index'
 import { responseMessageRole, ResponseMessages } from './response-group'
 import { resolveShowEarlierAction, shouldAutoShowEarlier, useTranscriptWindow } from './transcript-window'
 import { useMessagesBelow } from './use-messages-below'
@@ -1514,8 +1515,16 @@ const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
   useMessagesBelow({ contentRef, scrollRef, isAtBottom, paneVisible, rows, sessionKey, sessionId: scrollSessionId })
   useStickyPromptClip({ contentRef, scrollRef, paneVisible, rows })
 
+  // PERF (Fix 5): serve the per-flush list-scan results that
+  // AssistantMessage + UserMessage used to derive themselves via
+  // O(messages) useAuiState selectors. Computed once per signature flip
+  // and passed via context, so each mounted message does an O(1) Map
+  // lookup instead of an O(messages) scan + greedy regex.
+  const threadIndex = useThreadIndexValue()
+
   return (
-    <div
+    <ThreadIndexProvider value={threadIndex}>
+      <div
       className="relative min-h-0 max-w-full overflow-hidden contain-[layout_paint]"
       style={
         {
@@ -1578,7 +1587,8 @@ const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
           )}
         </div>
       </div>
-    </div>
+      </div>
+    </ThreadIndexProvider>
   )
 }
 
