@@ -32,8 +32,16 @@ function transcriptBytes(state: ClientSessionState): number {
   return JSON.stringify(state.messages).length * 2
 }
 
-function hasDraftOrInFlightMessage(state: ClientSessionState): boolean {
-  return state.messages.some(message => message.pending === true)
+function countPendingMessages(state: ClientSessionState): number {
+  let count = 0
+
+  for (const message of state.messages) {
+    if (message.pending === true) {
+      count += 1
+    }
+  }
+
+  return count
 }
 
 /**
@@ -46,6 +54,13 @@ export class SessionStateCache extends Map<string, ClientSessionState> {
   readonly #maxCount: number
   readonly #recency = new Map<string, number>()
   readonly #transcriptWeights = new WeakMap<ClientSessionState['messages'], number>()
+  // Per-state pending message count, keyed by the state object. `set()` walks
+  // `state.messages` exactly once (when a state is first installed or replaced)
+  // so #isWarmSettled and prune() can decide in O(1) whether a transcript has
+  // any draft or in-flight row. WeakMap so the count dies with the state
+  // object the moment it is replaced or evicted — no manual cleanup, no leak
+  // for state objects that never make it into the cache.
+  readonly #pendingMessageCounts = new WeakMap<ClientSessionState, number>()
   #clock = 0
 
   constructor(callbacks: SessionStateCacheCallbacks, limits: SessionStateCacheLimits = {}) {
@@ -67,6 +82,12 @@ export class SessionStateCache extends Map<string, ClientSessionState> {
 
   override set(runtimeId: string, state: ClientSessionState): this {
     super.set(runtimeId, state)
+    // Snapshot the pending-message count once per state install. updateSessionState
+    // always calls `cache.set()` before `cache.prune()`, so prune always sees the
+    // current count without walking messages again. The WeakMap entry rides with
+    // this state object — when the entry is replaced or evicted, the count dies
+    // with it.
+    this.#pendingMessageCounts.set(state, countPendingMessages(state))
     this.#touch(runtimeId)
 
     return this
@@ -137,11 +158,19 @@ export class SessionStateCache extends Map<string, ClientSessionState> {
       return false
     }
 
+    // O(1) check backed by the per-state counter populated in set(). The
+    // WeakMap lookup is missing only if `state` was never installed via
+    // set() — fall back to a one-shot scan in that rare case (typically a
+    // hand-constructed state passed straight to `super.set` from a test
+    // harness or a future caller we haven't migrated yet).
+    const pendingCount = this.#pendingMessageCounts.get(state)
+    const hasPending = pendingCount === undefined ? countPendingMessages(state) > 0 : pendingCount > 0
+
     return (
       Boolean(state.storedSessionId) &&
       state.messages.length > 0 &&
       !state.needsInput &&
-      !hasDraftOrInFlightMessage(state) &&
+      !hasPending &&
       !this.#callbacks.isReferenced(runtimeId, state)
     )
   }
