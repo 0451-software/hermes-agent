@@ -903,6 +903,32 @@ export function mergeInFlightMessages(
 
 const persistTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const persistLatest = new Map<string, JournalableSessionState>()
+// Cheap fingerprint of the tail that the next `writeSnapshot` would persist.
+// `updateSessionState` can refire during idle re-renders with content that
+// hasn't changed since the last flush (e.g. a long tool-call window with no
+// streamed tokens). Comparing on this short string short-circuits the throttle
+// entirely and skips the synchronous localStorage write that was the dominant
+// renderer-paint long task. Full equality on the 160 KB raw payload is
+// intentionally avoided here — that is exactly the work we are skipping.
+const lastWrittenSignature = new Map<string, string>()
+
+function tailSignature(state: JournalableSessionState): string {
+  const tail = recoverableTail(state.messages, state.streamId)
+  const parts: string[] = []
+
+  for (let index = 0; index < tail.length; index += 1) {
+    const message = tail[index]
+    const kind = message.parts
+      .map(part => part.type)
+      .join('+')
+
+    parts.push(
+      `${message.role}|${message.id}|${kind}|${chatMessageText(message).length}|${message.pending ? 1 : 0}|${message.error ? 1 : 0}`
+    )
+  }
+
+  return `${state.streamId ?? ''}|${state.turnStartedAt ?? ''}|${state.busy ? 1 : 0}|${state.awaitingResponse ? 1 : 0}|${parts.join(';')}`
+}
 
 /** @internal Test-only reset for module-scoped throttles and sweep state. */
 export function resetInFlightTurnJournalStateForTests(): void {
@@ -912,6 +938,7 @@ export function resetInFlightTurnJournalStateForTests(): void {
 
   persistTimers.clear()
   persistLatest.clear()
+  lastWrittenSignature.clear()
   sessionStoreSwept = false
 }
 
@@ -962,7 +989,14 @@ function writeSnapshot(storedSessionId: string, state: JournalableSessionState):
     // A quota failure must not leave an older, misleading snapshot behind, or
     // let the stale v1 predecessor be resurrected on a later read.
     tombstoneUnlessRecoverable(store, key)
+
+    return
   }
+
+  // Record the tail fingerprint of what we just persisted so the next
+  // equivalent commit short-circuits the throttle entirely (see
+  // `tailSignature` above).
+  lastWrittenSignature.set(storedSessionId, tailSignature(state))
 }
 
 function tombstoneUnlessRecoverable(store: Storage, key: string): void {
@@ -1004,6 +1038,20 @@ export function persistInFlightTurnState(state: JournalableSessionState): void {
     clearInFlightTurnJournal(storedSessionId)
 
     return
+  }
+
+  // Idempotency guard: if the tail we would persist is structurally identical
+  // to what the last flush wrote and no write is currently in flight, the next
+  // 400ms write would just reserialise and re-store the same bytes. Bail out
+  // before queuing the timer so the renderer paint thread stays free during
+  // long idle windows of a streamed turn (e.g. a long tool call with no
+  // assistant-token deltas between flushes — see C-09 in
+  // agent-notes/projects/2026-09-26/hermes-desktop-cpu-investigation).
+  if (!persistTimers.has(storedSessionId)) {
+    const signature = tailSignature(state)
+    if (lastWrittenSignature.get(storedSessionId) === signature) {
+      return
+    }
   }
 
   persistLatest.set(storedSessionId, state)
@@ -1084,6 +1132,10 @@ export function clearInFlightTurnJournal(storedSessionId: null | string): void {
   }
 
   persistLatest.delete(storedSessionId)
+  // Drop the fingerprint for the cleared session: the entry is gone, so a
+  // later turn that happens to compute the same signature must still write
+  // through the throttle.
+  lastWrittenSignature.delete(storedSessionId)
 
   removeSnapshot(storedSessionId)
 }
