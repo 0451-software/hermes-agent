@@ -9,10 +9,11 @@ interface StickyPromptClipOptions {
   scrollRef: RefObject<HTMLElement | null>
   paneVisible: boolean
   rows: ReactNode
+  isAtBottom?: boolean
 }
 
 /** Clip covered content instead of painting a solid rectangle over the glass. */
-export function useStickyPromptClip({ contentRef, scrollRef, paneVisible, rows }: StickyPromptClipOptions) {
+export function useStickyPromptClip({ contentRef, scrollRef, paneVisible, rows, isAtBottom }: StickyPromptClipOptions) {
   const controller = useRef<ReturnType<typeof observeStickyPromptClip> | null>(null)
 
   useLayoutEffect(() => {
@@ -27,11 +28,15 @@ export function useStickyPromptClip({ contentRef, scrollRef, paneVisible, rows }
 
     if (paneVisible && viewport && content) {
       controller.current ??= observeStickyPromptClip(viewport, content)
-      // Reconcile before paint without tearing down surviving clips when a
-      // stream appends a message or the history window changes its rows.
-      controller.current.reconcile()
+      // The tail reader never needs the prompt clipped above the fold, so a
+      // rows-identity churn (driven by tailStart) must not force the layout
+      // walk reconcile() runs. Mirror useMessagesBelow's isAtBottom short-
+      // circuit; scroll/resize/IO paths still reconcile via schedule/measure.
+      if (!isAtBottom) {
+        controller.current.reconcile()
+      }
     }
-  }, [contentRef, scrollRef, paneVisible, rows])
+  }, [contentRef, scrollRef, paneVisible, rows, isAtBottom])
 
   useLayoutEffect(
     () => () => {

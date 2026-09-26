@@ -1512,7 +1512,7 @@ const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
   )
 
   useMessagesBelow({ contentRef, scrollRef, isAtBottom, paneVisible, rows, sessionKey, sessionId: scrollSessionId })
-  useStickyPromptClip({ contentRef, scrollRef, paneVisible, rows })
+  useStickyPromptClip({ contentRef, scrollRef, paneVisible, rows, isAtBottom })
 
   return (
     <div
