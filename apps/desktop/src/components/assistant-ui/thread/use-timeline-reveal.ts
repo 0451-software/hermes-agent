@@ -7,7 +7,12 @@ import { useTranscriptWindow } from './transcript-window'
 
 interface TimelineRevealOptions {
   viewport: RefObject<HTMLElement | null>
-  groups: readonly { id: string; weight: number }[]
+  groups: readonly { id: string; weight?: number }[]
+  // Parallel to `groups`; when provided, sums use `weights[i]` instead of
+  // `groups[i].weight`. Keeps the hot path allocation-free: `list.tsx` no
+  // longer spreads one object per group per flush to materialise weighted
+  // groups, it just passes the (already-parsed) weight numbers alongside.
+  weights?: readonly number[]
   hiddenCount: number
   renderBudget: number
   olderAvailable: boolean
@@ -122,7 +127,11 @@ export function useTimelineReveal(options: TimelineRevealOptions) {
                 : state.groups.findIndex(group => group.id === id)
 
             if (index >= 0) {
-              const budget = state.groups.slice(index).reduce((sum, group) => sum + group.weight, 0) + 1
+              const weights = state.weights
+              const budget =
+                weights !== undefined
+                  ? weights.slice(index).reduce((sum, weight) => sum + weight, 0) + 1
+                  : state.groups.slice(index).reduce((sum, group) => sum + (group.weight ?? 1), 0) + 1
 
               if (budget > state.renderBudget) {
                 state.revealBudget(budget)
