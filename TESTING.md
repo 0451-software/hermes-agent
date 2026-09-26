@@ -6,9 +6,9 @@ agent is taking turns. All 13 fixes are also available as individual draft PRs
 on this fork (`https://github.com/0451-software/hermes-agent/pulls`); this
 branch is just the same fixes pre-merged onto `main` for local build/test.
 
-**Bundle commit:** `1cd8b4167b890acc43d66027605bbfb00ed2cee6`
+**Bundle commit:** `69b7f3e076abdcafcbbe80b2da47e47ce36c9b51`
 **Branch:** `desktop-cpu-bundle-2026-09-26` on `0451-software/hermes-agent`
-**Upstream base:** `NousResearch/hermes-agent` main (commit `cb399b56d9`)
+**Upstream base:** `NousResearch/hermes-agent` main
 
 ## What's in the bundle (16 files / +638 / -157 lines)
 
@@ -28,56 +28,94 @@ branch is just the same fixes pre-merged onto `main` for local build/test.
 | 12 | failed-api async flush | `apps/desktop/electron/main.ts` | +1/-1 | Replace sync flush with async flush in catch block |
 | 13 | terminal IPC rAF | `terminal-output-gate.ts`, `.test.ts` | +115/-20 | Coalesce attached-mode chunks via setImmediate |
 
-## Building
+## Prerequisites
 
-The bundle uses pnpm for the desktop app. From the bundle worktree root:
+- **Node** `^22.22.0 || ^24.11.0 || >=26.0.0` (see `apps/desktop/package.json` engines)
+- **npm** (the desktop app uses **npm**, not pnpm — there is no pnpm-workspace.yaml)
+- **Python 3.14** + **uv** (the desktop bundles a Python agent payload via `npm run payload`; the dev loop doesn't need this)
+- **Git** with LFS disabled or not required (no LFS in the repo)
+
+> The desktop workspace's `node_modules` are **hoisted to the repo root**, so
+> `npm ci` from the repo root installs everything the build needs.
+> `apps/desktop/scripts/assert-root-install.mjs` will refuse to start the
+> build if root install is missing or partial.
+
+## Building & running (corrected)
+
+From the **repo root** (`/workspace/source/hermes-agent` in the container,
+the cloned `hermes-agent` directory on your machine):
 
 ```bash
-# 1. Install dependencies (the desktop app lives under apps/desktop)
-cd apps/desktop
-pnpm install --frozen-lockfile=false
+# 1. Clone the fork and switch to the bundle
+git clone https://github.com/0451-software/hermes-agent.git
+cd hermes-agent
+git checkout desktop-cpu-bundle-2026-09-26
 
-# 2. Typecheck
-pnpm -w tsc -p apps/desktop/tsconfig.json --noEmit
-# (full repo tsc OOMs in 8 GB sandboxes; per-package tsc is enough)
+# 2. Install dependencies from the repo root (hoisted workspace install)
+npm ci
+
+# 3. Typecheck the touched files (full repo tsc OOMs in 8 GB sandboxes; this is enough)
+cd apps/desktop
+npx tsc --build tsconfig.electron.json --noEmit    # electron main + IPC
+npx tsc --build tsconfig.json --noEmit             # renderer
 ```
 
-## Running the desktop app
+### Run the desktop app (dev mode)
 
 ```bash
 cd apps/desktop
-pnpm dev
+npm run dev
 ```
 
-This starts the Electron app with HMR. The fix that is most likely to give
-an immediate, visible reduction in CPU is **Fix 1** (deep-compare gate) —
-when the agent streams a long response, CPU should drop within seconds.
+This runs `concurrently` over two processes:
 
-## Targeted perf verification
+- `dev:renderer` — Vite dev server on `http://127.0.0.1:5174` (HMR)
+- `dev:electron` — `tsc --build tsconfig.electron.json`, then waits for the
+  renderer to come up, then `electron .` against the dev URL
 
-To verify the per-flush reconcile path is no longer the bottleneck:
+`dev:renderer` re-runs `assert-root-install.mjs` first; if root install is
+missing, you'll get a clear error pointing back at step 2.
 
-1. Open the app, start a chat session.
-2. Send a message that produces a long streaming response.
-3. Open Chrome DevTools (View > Toggle Developer Tools) and profile.
+### Build a packaged app (optional)
 
-**Expected delta on a long stream:**
-- "Recalculate Style" tasks should drop by **>50%** on the streaming path.
-- "Scripting" should no longer be dominated by `preserveLocalAssistantErrors`.
-- The throttled "Idle Callback (setTimeout)" path should fire ~2-3 Hz instead of
-  ~30 Hz for the inflight journal write (Fix 2).
+```bash
+cd apps/desktop
+npm run build      # full build → apps/desktop/dist
+npm run start      # runs electron against the built dist
+```
 
-If you can capture a Performance trace before and after this bundle, the
-biggest visible diff should be in the `_intersectionObserver → reconcile →
-flushPendingViewState` chain.
+Or for an unpacked distributable:
 
-## Individual PR testing
+```bash
+npm run pack       # produces an unpacked Electron app under apps/desktop/dist
+```
+
+### Quick smoke-test checklist
+
+1. App window opens; no `assert-root-install` or `katex/dist/katex.min.css`
+   unresolved-import errors.
+2. Start a chat session, send a message.
+3. The agent streams a long response — confirm:
+   - **CPU drops during streaming** (was the original symptom).
+   - "Recalculate Style" tasks in DevTools Performance trace drop >50%.
+   - "Scripting" is no longer dominated by `preserveLocalAssistantErrors`.
+   - The inflight journal `setTimeout` fires 2-3 Hz instead of ~30 Hz
+     (visible in the trace as an `Idle Callback (setTimeout)` task; this
+     proves Fix 2's idempotency fingerprint is short-circuiting).
+4. Open DevTools → Performance → record a 30 s trace during a long stream.
+   Compare against a baseline from `fork/main`.
+
+## Testing a single fix in isolation
 
 If you'd rather review / test one fix at a time:
 
 ```bash
+# from the repo root, after `npm ci`
+git fetch origin
 git checkout -b test/fix-N origin/agent/desktop-cpu/fix-N-<slug>
-# (e.g. fix-1-deep-compare-gate, fix-2-inflight-throttle, etc.)
+# e.g. fix-1-deep-compare-gate, fix-2-inflight-throttle, etc.
+cd apps/desktop
+npm run dev
 ```
 
 Each PR is independent; you can check them out one by one on top of `main`.
