@@ -645,7 +645,17 @@ const PREVIEW_GUEST_PRELOAD_PATH = path.join(APP_ROOT, 'dist', 'preview-guest-pr
 // next to the connection's latency. Must run before app `ready` — these
 // switches only apply pre-launch. Override with HERMES_DESKTOP_DISABLE_GPU
 // (1/true → always disable, 0/false → keep GPU on).
-const REMOTE_DISPLAY_REASON = detectRemoteDisplay()
+// HERMES_DESKTOP_FORCE_GPU_REMOTE_DISPLAY=1 escapes the heuristic below: some
+// remote-display setups (X11 forwarding with hardware acceleration, GPU
+// passthrough over VNC) are detected as "remote" but don't show the flicker,
+// so the heuristic drops the GPU for nothing. Precedence: this override wins;
+// HERMES_DESKTOP_DISABLE_GPU=0/off is already honored inside detectRemoteDisplay()
+// (returns null upstream and never reaches this block).
+const forceRemoteDisplayGpu = String(process.env.HERMES_DESKTOP_FORCE_GPU_REMOTE_DISPLAY || '')
+  .trim()
+  .toLowerCase() === '1'
+
+const REMOTE_DISPLAY_REASON = forceRemoteDisplayGpu ? null : detectRemoteDisplay()
 
 if (REMOTE_DISPLAY_REASON) {
   app.disableHardwareAcceleration()
@@ -654,6 +664,10 @@ if (REMOTE_DISPLAY_REASON) {
   app.commandLine.appendSwitch('disable-gpu-compositing')
   console.log(
     `[hermes] remote display detected (${REMOTE_DISPLAY_REASON}); disabling GPU hardware acceleration to prevent flicker`
+  )
+} else if (forceRemoteDisplayGpu) {
+  console.log(
+    '[hermes] HERMES_DESKTOP_FORCE_GPU_REMOTE_DISPLAY=1; keeping GPU acceleration despite remote-display heuristic'
   )
 }
 
